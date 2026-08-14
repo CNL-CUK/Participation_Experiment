@@ -15,6 +15,8 @@ export const CONFIG = {
 
   arriveBeforeMinutes: 10,
   showCourseFields: true,
+  courseNote:
+  '실험 참여 가산점을 신청하는 경우, 강의명과 담당 교수를 모두 입력해 주세요. 해당되지 않는 경우에는 비워 두셔도 됩니다.',
   mobileBreakpoint: 768,
 };
 

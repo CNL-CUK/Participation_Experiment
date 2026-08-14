@@ -165,10 +165,19 @@ export default function ParticipantForm({ slot, onSuccess, onConflict, compact }
       })}
 
       {CONFIG.showCourseFields && (
-        <div className="pf-row">
-          {field('course', '강의명', { maxLength: TEXT_LIMIT.course })}
-          {field('courseProf', '담당 교수', { maxLength: TEXT_LIMIT.courseProf })}
-        </div>
+        <>
+          <div className="pf-row">
+            {field('course', '강의명', { maxLength: TEXT_LIMIT.course })}
+            {field('courseProf', '담당 교수', { maxLength: TEXT_LIMIT.courseProf })}
+            
+          </div>
+
+          {CONFIG.courseNote && (
+            <p className="pf-course-note">
+              {CONFIG.courseNote}
+            </p>
+          )}
+        </>
       )}
 
       <div className="pf-agree">

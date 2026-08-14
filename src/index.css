@@ -660,6 +660,16 @@ button {
   color: var(--danger);
 }
 
+.pf-course-note {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--navy-soft);
+  color: var(--ink-2);
+  font-size: 11.5px;
+  line-height: 1.65;
+}
+
 .pf-agree {
   display: flex;
   align-items: flex-start;
