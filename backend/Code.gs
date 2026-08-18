@@ -1,9 +1,12 @@
 const SHEET_NAME = 'slots';
 const TZ = 'Asia/Seoul';
+const LOCK_WAIT_MS = 10000;
+const SLOT_CACHE_KEY = 'slot-payload-v1';
+const SLOT_CACHE_SECONDS = 15;
 
-// 실험 일정과 운영 시간이 바뀌면 이 값을 수정하세요.
+// 실험 일정, 운영 시간 수정
 const SCHEDULE = {
-  startDate: '2026-08-10',
+  startDate: '2026-08-31',
   endDate: '2026-09-18',
   openTime: '09:00',
   lastStartTime: '18:00',
@@ -11,13 +14,13 @@ const SCHEDULE = {
   weekdaysOnly: true
 };
 
-// 프론트엔드 src/config.js와 동일하게 유지하세요.
+// 프론트엔드 src/config.js와 동일하게 유지
 const POLICY = {
   cancelDeadlineHours: 3,
   studentIdLength: 9
 };
 
-// 테스트할 때 실제 예약이 없는 슬롯으로 바꾸세요.
+// 테스트 시 실제 예약이 없는 슬롯으로
 const TEST_SLOT = '2026-08-31_09:00';
 
 const COL = {
@@ -59,34 +62,12 @@ const UNSAFE_PREFIX = /^[=+\-@]/;
 
 function doGet() {
   try {
-    const rows = getSheet().getDataRange().getValues();
-    const slots = [];
+    const cached = readSlotCache();
+    if (cached) return json(cached);
 
-    for (let index = 1; index < rows.length; index++) {
-      if (!cell(rows[index], 'slotId')) continue;
-
-      const date = formatDateValue(cell(rows[index], 'date'));
-      const time = formatTimeValue(cell(rows[index], 'time'));
-      const storedStatus = normalizeText(cell(rows[index], 'status'));
-      let status = SAFE_STATUS[storedStatus] ? storedStatus : 'closed';
-
-      if (status === 'available' && isPast(date, time)) status = 'expired';
-
-      slots.push({
-        slotId: normalizeText(cell(rows[index], 'slotId')),
-        date: date,
-        time: time,
-        status: status
-      });
-    }
-
-    slots.sort(compareSlots);
-    return json({
-      ok: true,
-      times: timeSlots(),
-      slotMinutes: SCHEDULE.slotMinutes,
-      slots: slots
-    });
+    const payload = buildSlotPayload();
+    writeSlotCache(payload);
+    return json(payload);
   } catch (error) {
     console.error(error);
     return json({ ok: false, reason: 'server_error' });
@@ -118,17 +99,22 @@ function doPost(event) {
 
 function withLock(callback) {
   const lock = LockService.getScriptLock();
+  const waitStartedAt = Date.now();
 
-  try {
-    lock.waitLock(10000);
-  } catch (error) {
+  if (!lock.tryLock(LOCK_WAIT_MS)) {
+    console.warn('slot_lock_timeout waitedMs=' + (Date.now() - waitStartedAt));
     return json({ ok: false, reason: 'busy' });
   }
 
+  const acquiredAt = Date.now();
   try {
     return callback();
   } finally {
     lock.releaseLock();
+    console.log(
+      'slot_lock waitedMs=' + (acquiredAt - waitStartedAt) +
+      ' heldMs=' + (Date.now() - acquiredAt)
+    );
   }
 }
 
@@ -149,7 +135,6 @@ function book(request) {
 
   const createdAt = Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd HH:mm:ss');
   const range = found.sheet.getRange(found.index, WRITE_START, 1, WRITE_LEN);
-  range.setNumberFormat('@');
   range.setValues([[
     'booked',
     input.name,
@@ -159,6 +144,7 @@ function book(request) {
     input.courseProf,
     createdAt
   ]]);
+  commitSlotChange();
 
   return json({ ok: true, slotId: normalizeText(request.slotId), date: date, time: time });
 }
@@ -185,6 +171,7 @@ function cancel(request) {
   found.sheet.getRange(found.index, WRITE_START, 1, WRITE_LEN).setValues([[
     'available', '', '', '', '', '', ''
   ]]);
+  commitSlotChange();
   return json({ ok: true });
 }
 
@@ -272,19 +259,82 @@ function normalizeText(value) {
 
 function findSlot(slotId) {
   const sheet = getSheet();
-  const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return null;
+  const rows = sheet.getDataRange().getValues();
+  const target = normalizeText(slotId);
 
-  const match = sheet
-    .getRange(2, COL.slotId, lastRow - 1, 1)
-    .createTextFinder(normalizeText(slotId))
-    .matchEntireCell(true)
-    .findNext();
+  for (let index = 1; index < rows.length; index++) {
+    if (normalizeText(cell(rows[index], 'slotId')) === target) {
+      return { sheet: sheet, index: index + 1, data: rows[index] };
+    }
+  }
 
-  if (!match) return null;
-  const index = match.getRow();
-  const data = sheet.getRange(index, 1, 1, COL.createdAt).getValues()[0];
-  return { sheet: sheet, index: index, data: data };
+  return null;
+}
+
+function buildSlotPayload() {
+  const rows = getSheet().getDataRange().getValues();
+  const slots = [];
+
+  for (let index = 1; index < rows.length; index++) {
+    if (!cell(rows[index], 'slotId')) continue;
+
+    const date = formatDateValue(cell(rows[index], 'date'));
+    const time = formatTimeValue(cell(rows[index], 'time'));
+    const storedStatus = normalizeText(cell(rows[index], 'status'));
+    let status = SAFE_STATUS[storedStatus] ? storedStatus : 'closed';
+
+    if (status === 'available' && isPast(date, time)) status = 'expired';
+
+    slots.push({
+      slotId: normalizeText(cell(rows[index], 'slotId')),
+      date: date,
+      time: time,
+      status: status
+    });
+  }
+
+  slots.sort(compareSlots);
+  return {
+    ok: true,
+    times: timeSlots(),
+    slotMinutes: SCHEDULE.slotMinutes,
+    slots: slots
+  };
+}
+
+function readSlotCache() {
+  try {
+    const cached = CacheService.getScriptCache().get(SLOT_CACHE_KEY);
+    return cached ? JSON.parse(cached) : null;
+  } catch (error) {
+    console.warn('slot_cache_read_failed ' + error);
+    return null;
+  }
+}
+
+function writeSlotCache(payload) {
+  try {
+    CacheService.getScriptCache().put(
+      SLOT_CACHE_KEY,
+      JSON.stringify(payload),
+      SLOT_CACHE_SECONDS
+    );
+  } catch (error) {
+    console.warn('slot_cache_write_failed ' + error);
+  }
+}
+
+function clearSlotCache() {
+  try {
+    CacheService.getScriptCache().remove(SLOT_CACHE_KEY);
+  } catch (error) {
+    console.warn('slot_cache_clear_failed ' + error);
+  }
+}
+
+function commitSlotChange() {
+  SpreadsheetApp.flush();
+  clearSlotCache();
 }
 
 function timeSlots() {
@@ -395,7 +445,10 @@ function generateSlots() {
     return;
   }
 
-  sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, HEADERS.length).setValues(newRows);
+  const range = sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, HEADERS.length);
+  range.setNumberFormat('@');
+  range.setValues(newRows);
+  commitSlotChange();
   SpreadsheetApp.getUi().alert(newRows.length + '개 슬롯을 추가했습니다.');
 }
 
